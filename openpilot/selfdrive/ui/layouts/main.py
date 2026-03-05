@@ -72,6 +72,9 @@ class MainLayout(Widget):
     device.add_interactive_timeout_callback(self._set_mode_for_state)
     ui_state.add_on_body_changed_callbacks(self._on_body_changed)
 
+  def hide_event(self):
+    device.remove_interactive_timeout_callback(self._set_mode_for_state)
+
   def _update_layout_rects(self):
     self._sidebar_rect = rl.Rectangle(self._rect.x, self._rect.y, SIDEBAR_WIDTH, self._rect.height)
 
