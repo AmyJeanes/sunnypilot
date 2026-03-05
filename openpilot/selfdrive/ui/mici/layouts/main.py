@@ -85,6 +85,10 @@ class MiciMainLayout(Scroller):
     device.add_interactive_timeout_callback(self._on_interactive_timeout)
     ui_state.add_on_body_changed_callbacks(self._on_body_changed)
 
+  def hide_event(self):
+    gui_app.remove_nav_stack_tick(self._handle_transitions)
+    device.remove_interactive_timeout_callback(self._on_interactive_timeout)
+
   def _scroll_to(self, layout: Widget):
     layout_x = int(layout.rect.x)
     self._scroller.scroll_to(layout_x, smooth=True)

@@ -321,7 +321,12 @@ class Device(DeviceSP):
     self._interaction_time = time.monotonic() + self.interactive_timeout
 
   def add_interactive_timeout_callback(self, callback: Callable):
-    self._interactive_timeout_callbacks.append(callback)
+    if callback not in self._interactive_timeout_callbacks:
+      self._interactive_timeout_callbacks.append(callback)
+
+  def remove_interactive_timeout_callback(self, callback: Callable):
+    if callback in self._interactive_timeout_callbacks:
+      self._interactive_timeout_callbacks.remove(callback)
 
   def update(self):
     self._start_brightness_thread()  # start thread after manager forks ui
