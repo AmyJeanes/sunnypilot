@@ -213,6 +213,7 @@ class Modem:
     self._sim_change = False
     self._apn = ""  # blank = network-provided via PCO
     self._roaming_allowed = True
+    self._reattach_next_init = False
     self.running = True
     self.S = INITIAL_STATE.copy()
 
@@ -315,6 +316,13 @@ class Modem:
     for c in cmds:
       self._at(c)
 
+  def _reattach_ps(self):
+    # frees a default bearer the *99# dial can't bind (e.g. one still held by a
+    # lingering QMI data session); SEARCHING then waits for re-registration
+    logging.info("re-attaching PS (CGATT)")
+    self._at("AT+CGATT=0")
+    self._at("AT+CGATT=1")
+
   def _do_initializing(self):
     if not os.path.exists(AT_PORT):
       return State.INITIALIZING
@@ -339,6 +347,9 @@ class Modem:
     # blank APN lets the carrier supply one via PCO
     self._at(f'AT+CGDCONT={DIAL_CID},"IP","{self._apn}"')
     logging.info(f"APN '{self._apn or '(network-provided)'}' written to CID {DIAL_CID}, roaming={'on' if self._roaming_allowed else 'off'}")
+    if self._reattach_next_init:
+      self._reattach_next_init = False
+      self._reattach_ps()
 
     self._sim_change = False  # clear since we just re-read identity with the new SIM
     self._publish_state(**identity)
@@ -409,6 +420,7 @@ class Modem:
       return State.DISCONNECTING
     give_up = self._ppp.record_fail()
     if give_up:
+      self._reattach_next_init = True  # PPP won't establish; free the bearer before retrying
       logging.warning(f"PPP fail {self._ppp.fails}/{self._ppp.MAX_FAILS}, reconnecting")
       return State.DISCONNECTING
     logging.warning(f"PPP fail {self._ppp.fails}/{self._ppp.MAX_FAILS}, retrying")
