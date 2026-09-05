@@ -115,8 +115,9 @@ class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
   # v23 / chestnut_v26 are the first whole-file manifests (no chunks, selector version 20).
   # Older clients keep reading the chunked v22 / chestnut_v25 manifests.
-  MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v23.json"
-  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v26.json"
+  # fork testing: served from the AmyJeanes docs repo until sunnypilot hosts them
+  MODEL_URL = "https://raw.githubusercontent.com/AmyJeanes/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v23.json"
+  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/AmyJeanes/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v26.json"
 
   MODEL_SOURCES = {
     "qcom": (MODEL_URL, ""),
