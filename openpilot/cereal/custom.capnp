@@ -138,6 +138,7 @@ struct ModelManagerSP @0xaedffd8f31e7b55d {
     status @0 :DownloadStatus;
     progress @1 :Float32;
     eta @2 :UInt32;
+    speed @3 :Float32;  # bytes per second, smoothed
   }
 
   struct Chunk {
@@ -149,7 +150,7 @@ struct ModelManagerSP @0xaedffd8f31e7b55d {
     fileName @0 :Text;
     downloadUri @1 :DownloadUri;
     downloadProgress @2 :DownloadProgress;
-    chunks @3 :List(Chunk);
+    chunks @3 :List(Chunk);  # unused since selector version 20: models are whole files
   }
 
   struct Model {
