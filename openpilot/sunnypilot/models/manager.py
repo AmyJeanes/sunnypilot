@@ -108,9 +108,9 @@ def _prepare_target(path: str, layout: dict) -> set[int]:
   try:
     with open(_sidecar_path(path)) as f:
       state = json.load(f)
-    if all(state.get(k) == v for k, v in layout.items()) and os.path.getsize(path) == total:
-      return set(state.get("done", []))
-  except (OSError, ValueError):
+    if isinstance(state, dict) and all(state.get(k) == v for k, v in layout.items()) and os.path.getsize(path) == total:
+      return {i for i in state.get("done", []) if isinstance(i, int)}
+  except (OSError, ValueError, TypeError):  # missing, unreadable or malformed sidecar: start over
     pass
   with open(path, "wb") as f:
     f.truncate(total)
@@ -298,7 +298,9 @@ class ModelManagerSP:
     total, ranged = await loop.run_in_executor(None, _probe_size, url)
     piece_size = PIECE_SIZE
     pieces: list[tuple[int, int | None]] = list(_piece_ranges(total, piece_size)) if ranged else [(0, None)]
-    layout = {"total": total, "piece_size": piece_size, "ranged": ranged}
+    # sha256 keys the resume state to this exact content: a republished model of the same name
+    # and size never resumes from the old bytes
+    layout = {"total": total, "piece_size": piece_size, "ranged": ranged, "sha256": artifact.downloadUri.sha256}
     done = await loop.run_in_executor(None, _prepare_target, path, layout)
     progress = _Progress(done, sum(end - start for i, (start, end) in enumerate(pieces) if i in done and end is not None))
     cancel = threading.Event()
