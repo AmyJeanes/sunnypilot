@@ -80,10 +80,19 @@ def _download_in_progress(path: str) -> bool:
 
 
 def _save_resume_state(path: str, layout: dict, done: set[int]) -> None:
+  # durable against power loss: the sidecar only ever names pieces whose bytes are already
+  # synced (see _fetch_piece), and is itself synced before it replaces the previous one
   tmp = _sidecar_path(path) + ".tmp"
   with open(tmp, "w") as f:
     json.dump({**layout, "done": sorted(done)}, f)
+    f.flush()
+    os.fsync(f.fileno())
   os.replace(tmp, _sidecar_path(path))
+  dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+  try:
+    os.fsync(dir_fd)
+  finally:
+    os.close(dir_fd)
 
 
 def _remove_download_state(path: str) -> None:
@@ -151,8 +160,13 @@ def _fetch_piece(url: str, path: str, index: int, start: int, end: int | None, p
             progress.add_bytes(len(block))
           if end is None:
             f.truncate()  # unknown length: the body defines the file size
-      if end is not None and written != end - start:
-        raise requests.exceptions.ConnectionError(f"short read: {written} of {end - start} bytes")
+          if end is not None and written != end - start:
+            raise requests.exceptions.ConnectionError(f"short read: {written} of {end - start} bytes")
+          # a piece counts as done only once its bytes are on flash: a sudden power loss
+          # (engine crank, battery disconnect) must not leave the sidecar claiming pieces
+          # that were still in the page cache, or the resumed file can never verify
+          f.flush()
+          os.fdatasync(f.fileno())
       progress.mark_done(index)
       return
     except requests.RequestException as e:
