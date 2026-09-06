@@ -195,7 +195,8 @@ class ManagerDownloadTestBase(OpenpilotTestCase):
     with open(self.sidecar) as f:
       return json.load(f)
 
-  def write_resume_state(self, done: list[int], total: int = len(WHOLE_BODY), file_size: int | None = None) -> None:
+  def write_resume_state(self, done: list[int], total: int = len(WHOLE_BODY), file_size: int | None = None,
+                         file_sha256: str = sha256(WHOLE_BODY)) -> None:
     """An interrupted download: a full-size file holding the `done` pieces plus its sidecar."""
     with open(self.path, 'wb') as f:
       f.truncate(len(WHOLE_BODY) if file_size is None else file_size)
@@ -203,7 +204,7 @@ class ManagerDownloadTestBase(OpenpilotTestCase):
         f.seek(i * PIECE)
         f.write(WHOLE_BODY[i * PIECE:(i + 1) * PIECE])
     with open(self.sidecar, 'w') as f:
-      json.dump({"total": total, "piece_size": PIECE, "ranged": True, "done": done}, f)
+      json.dump({"total": total, "piece_size": PIECE, "ranged": True, "sha256": file_sha256, "done": done}, f)
 
   @staticmethod
   def piece_requests() -> list[tuple[int, int]]:
@@ -386,6 +387,31 @@ class TestManagerDownload(ManagerDownloadTestBase):
       self.download_file()
       assert piece_range(0) in self.piece_requests()
       assert self.read_path() == WHOLE_BODY
+    self.run_with_server(body)
+
+  def test_resume_state_for_other_content_is_ignored(self):
+    """A sidecar for different bytes of the same name and size (the model was republished) starts over."""
+    def body():
+      self.write_resume_state(done=[0], file_sha256="0" * 64)
+      self.download_file()
+      assert piece_range(0) in self.piece_requests()
+      assert self.read_path() == WHOLE_BODY
+    self.run_with_server(body)
+
+  def test_malformed_resume_state_starts_over(self):
+    """A sidecar that is not the expected JSON object is ignored, never fatal."""
+    def body():
+      layout = {"total": len(WHOLE_BODY), "piece_size": PIECE, "ranged": True, "sha256": sha256(WHOLE_BODY)}
+      for junk in (b'[]', b'{"total": ', json.dumps({**layout, "done": 3}).encode(), json.dumps({**layout, "done": ["0", None]}).encode()):
+        with open(self.path, 'wb') as f:
+          f.truncate(len(WHOLE_BODY))
+        with open(self.sidecar, 'wb') as f:
+          f.write(junk)
+        DownloadHandler.request_ranges = []
+        self.download_file()
+        assert sorted(self.piece_requests()) == [piece_range(i) for i in range(NUM_PIECES)], f"sidecar {junk!r} must be ignored"
+        assert self.read_path() == WHOLE_BODY
+        assert not os.path.exists(self.sidecar)
     self.run_with_server(body)
 
   def test_resume_needs_a_full_size_file(self):
