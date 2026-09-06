@@ -992,6 +992,10 @@ class TestLiveModelManifest(OpenpilotTestCase):
     for manifest_url in (ModelFetcher.MODEL_URL, ModelFetcher.MODEL_URL_CHESTNUT):
       manifest = requests.get(manifest_url, timeout=30).json()
       for bundle in manifest.get('bundles', []):
+        # a build-all manifest starts as a copy of the previous one: entries still at the old
+        # selector version are never loaded by this client, so they are not checked either
+        if str(bundle.get('minimum_selector_version', '')).strip() != str(helpers.REQUIRED_JSON_VERSION):
+          continue
         for model in bundle.get('models', []):
           artifact = model['artifact']
           if artifact.get('chunks'):
