@@ -397,6 +397,18 @@ class TestManagerDownload(ManagerDownloadTestBase):
       assert self.read_path() == WHOLE_BODY
     self.run_with_server(body)
 
+  def test_pieces_and_resume_state_are_synced_to_disk(self):
+    """Every piece is fdatasync'd before it is recorded, and the sidecar is fsync'd: a power loss
+    mid-download must never leave resume state naming bytes that never reached flash."""
+    def body():
+      with mock.patch.object(manager_module.os, 'fdatasync', wraps=os.fdatasync) as piece_sync, \
+           mock.patch.object(manager_module.os, 'fsync', wraps=os.fsync) as state_sync:
+        self.download_file()
+      assert piece_sync.call_count == NUM_PIECES, f"expected one fdatasync per piece, got {piece_sync.call_count}"
+      assert state_sync.call_count >= 2, "sidecar file and directory must be fsync'd"
+      assert self.read_path() == WHOLE_BODY
+    self.run_with_server(body)
+
   def test_repeat_downloads_are_stable(self):
     """Back-to-back runs must produce identical bytes and leak no start-time state."""
     def body():
