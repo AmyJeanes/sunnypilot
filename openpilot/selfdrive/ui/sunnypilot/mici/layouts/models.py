@@ -4,15 +4,17 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import time
+
 import pyray as rl
 
 from openpilot.cereal import custom
-from openpilot.selfdrive.ui.mici.widgets.dialog import BigDialog
+from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog, BigDialog
 from openpilot.sunnypilot.models.helpers import ACTIVE_BUNDLE_KEYS, get_selected_bundle
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton
 from openpilot.selfdrive.ui.ui_state import ui_state, device
 from openpilot.selfdrive.ui.sunnypilot.model_info import (active_source, big_model_state, bundles_for_source, carrying_model,
-                                                           default_model_name, model_info, queued_name)
+                                                           default_model_name, model_cache_size_mb, model_info, queued_name)
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets import Widget
@@ -84,7 +86,11 @@ class ModelsLayoutMici(NavScroller):
     self.cancel_download_btn = BigButton(tr("cancel download"))
     self.cancel_download_btn.set_click_callback(lambda: ui_state.params.remove("ModelManager_DownloadRef"))
 
-    self.main_items = [self.current_model_info, self.select_model_btn, self.cancel_download_btn]
+    self.clear_cache_btn = BigButton(tr("clear cache"), value=f"{model_cache_size_mb():.1f} MB")
+    self.clear_cache_btn.set_click_callback(self._confirm_clear_cache)
+    self._cache_size_time = 0.0
+
+    self.main_items = [self.current_model_info, self.select_model_btn, self.cancel_download_btn, self.clear_cache_btn]
     self._scroller.add_widgets(self.main_items)
 
   @property
@@ -162,6 +168,12 @@ class ModelsLayoutMici(NavScroller):
     ui_state.params.remove(ACTIVE_BUNDLE_KEYS[source])
     self._pop_to_main()
 
+  def _confirm_clear_cache(self):
+    # the manager deletes every cached model except the selected slots' files, plus interrupted downloads
+    icon = gui_app.texture("../../sunnypilot/selfdrive/assets/offroad/icon_models.png", 64, 64)
+    gui_app.push_widget(BigConfirmationDialog(f"{tr('slide to')}\n{tr('clear cache')}", icon,
+                                              lambda: ui_state.params.put_bool("ModelManager_ClearCache", True), red=True))
+
   def _select_folder(self, folder_name):
     source = self._selection_source
     if source is None:  # folders are only reachable after picking a hardware
@@ -205,6 +217,12 @@ class ModelsLayoutMici(NavScroller):
       device.set_override_interactive_timeout(None)
     self._was_downloading = is_downloading
 
+    # the manager only services a clear after the current transfer, so don't offer it mid-download
+    self.clear_cache_btn.set_enabled(ui_state.is_offroad() and not is_downloading)
+    if (now := time.monotonic()) - self._cache_size_time > 0.5:
+      self._cache_size_time = now
+      self.clear_cache_btn.set_value(f"{model_cache_size_mb():.1f} MB")
+
     self.current_model_info.current_model_header.set_text(tr("active model"))
     active_text, info_header, info_text = _model_info()
     self.current_model_info.current_model_text.set_text(active_text)
@@ -212,8 +230,9 @@ class ModelsLayoutMici(NavScroller):
     self.current_model_info.info_text.set_text(info_text)
 
     if manager.selectedBundle and manager.selectedBundle.status == custom.ModelManagerSP.DownloadStatus.failed:
-      self.current_model_info.info_header.set_text(tr("error") + self._download_progress)
-      self.current_model_info.info_text.set_text(tr("download failed"))
+      # a failed bundle stays on the row until the next request, so it names the model and does not animate
+      self.current_model_info.info_header.set_text(tr("error"))
+      self.current_model_info.info_text.set_text(f"{manager.selectedBundle.internalName.lower()}  |  {tr('download failed')}")
 
     elif manager.selectedBundle and manager.selectedBundle.status == custom.ModelManagerSP.DownloadStatus.downloading:
       self.cancel_download_btn.set_visible(True)
@@ -221,6 +240,7 @@ class ModelsLayoutMici(NavScroller):
       progress = 0.0
       count = 0
       verifying = False
+      speed = 0.0  # max, not sum: artifacts sharing a file mirror the same transfer, and only one file is in flight
       for model in manager.selectedBundle.models:
         count += 1
         p = model.artifact.downloadProgress
@@ -228,6 +248,7 @@ class ModelsLayoutMici(NavScroller):
                         custom.ModelManagerSP.DownloadStatus.verifying):
           progress += p.progress
           verifying = verifying or p.status == custom.ModelManagerSP.DownloadStatus.verifying
+          speed = max(speed, p.speed)
         elif p.status in (custom.ModelManagerSP.DownloadStatus.downloaded,
                           custom.ModelManagerSP.DownloadStatus.cached):
           progress += 100.0
@@ -241,7 +262,10 @@ class ModelsLayoutMici(NavScroller):
       self.current_model_info.current_model_text.set_text(name_text)
       self.current_model_info.info_header.set_text(tr("progress") + self._download_progress)
       self.current_model_info.info_header._shimmer = True
-      self.current_model_info.info_text.set_text(f"{progress/count:.2f}%")
+      progress_text = f"{progress/count:.2f}%"
+      if speed > 0:
+        progress_text += f"  |  {speed / 1048576:.1f} MB/s"
+      self.current_model_info.info_text.set_text(progress_text)
 
     elif manager.selectedBundle and manager.selectedBundle.status == custom.ModelManagerSP.DownloadStatus.downloaded:
       self.current_model_info.info_header.set_text(tr("downloaded"))
