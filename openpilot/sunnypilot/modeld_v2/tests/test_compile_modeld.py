@@ -255,7 +255,7 @@ class TestStockCompileModeldEquivalence(OpenpilotTestCase):
     }
     frame_skip = 4
 
-    stock_queues, stock_npy, _frame_views = stock_make_input_queues(input_shapes, frame_skip, device='NPY', frame_copy_size=49152)
+    stock_queues, stock_npy = stock_make_input_queues(input_shapes, frame_skip, device='NPY')
     sunny_queues, sunny_npy = sunny_make_supercombo_input_queues(input_shapes, frame_skip, device='NPY')
     # sunnypilot split pipeline has tfm/big_tfm as queues; packed_npy_inputs size differs (different frame packing)
     assert set(stock_queues.keys()) <= set(sunny_queues.keys())

@@ -39,7 +39,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, 
 from openpilot.selfdrive.modeld.modeld import ChestnutState
 
 from openpilot.selfdrive.modeld.compile_modeld import (
-  MODELD_INPUTS,
+  QUEUE_INPUTS,
   make_input_queues as make_stock_input_queues,
 )
 from openpilot.sunnypilot.modeld_v2.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState, get_curvature_from_output
@@ -49,7 +49,7 @@ from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
 from openpilot.sunnypilot.modeld_v2.compile_modeld import (derive_frame_skip, make_split_input_queues,
                                                            make_supercombo_input_queues, nv12_copy_size,
-                                                           WARP_INPUTS, POLICY_INPUTS)
+                                                           make_legacy_run_model_queues, WARP_INPUTS, POLICY_INPUTS)
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.modeld_v2.helpers import load_oob
@@ -120,7 +120,10 @@ class ModelState(ModelStateBase):
     jits = load_oob(open_file_chunked(pkl_path))
 
     metadata = jits['metadata']
-    self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'
+    input_devices = jits.get('input_devices', {})
+    self.frames_in_place = 'warp' in input_devices   # new fused format warps on WARP_DEV and hands frames in place
+    warp_dev = input_devices.get('warp', metadata.get('warp_dev'))
+    self.WARP_DEV = (warp_dev or 'QCOM') if COMMA_HARDWARE else 'CPU'
     self.DEV = ('AMD' if self.chestnut else 'QCOM') if COMMA_HARDWARE else 'CPU'
     self.QUEUE_DEV = self.DEV
     self.is_run_model = 'run_model' in jits
@@ -141,9 +144,13 @@ class ModelState(ModelStateBase):
       self._vision_input_names = [key for key in self.input_shapes if 'img' in key]
       self.frame_skip = derive_frame_skip({}, self.input_shapes)
       if self.is_run_model:
-        self.input_queues, self.numpy_inputs, self.frame_buffers = make_stock_input_queues(
-          self.input_shapes, self.frame_skip, device=self.DEV, frame_copy_size=self.frame_copy_size)
-        self.frame_views, self.npy = self.frame_buffers, self.numpy_inputs
+        if self.frames_in_place:
+          self.input_queues, self.numpy_inputs = make_stock_input_queues(self.input_shapes, self.frame_skip, device=self.DEV)
+          self.npy = self.numpy_inputs
+        else:
+          self.input_queues, self.numpy_inputs, self.frame_buffers = make_legacy_run_model_queues(
+            self.input_shapes, self.frame_skip, device=self.DEV, frame_copy_size=self.frame_copy_size)
+          self.frame_views, self.npy = self.frame_buffers, self.numpy_inputs
         self.run_model, self.run_policy, self.warp = jits['run_model'][(cam_w, cam_h)], None, None
       else:
         self.input_queues, self.numpy_inputs = make_supercombo_input_queues(self.input_shapes, self.frame_skip, device=self.QUEUE_DEV)
@@ -185,19 +192,24 @@ class ModelState(ModelStateBase):
       self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key])
 
   def warmup(self) -> None:
-    dummy_size = self.frame_copy_size if self.is_run_model else self.frame_buf_params[self._road_key][3]
+    legacy_fused = self.is_run_model and not self.frames_in_place
+    dummy_size = self.frame_copy_size if legacy_fused else self.frame_buf_params[self._road_key][3]
     dummy_frames = {k: np.zeros(dummy_size, dtype=np.uint8) for k in self._vision_input_names}
     transforms = {k: np.eye(3, dtype=np.float32) for k in [self._road_key, self._wide_key] if k}
     dummy_inputs = {k: np.zeros(v.shape, dtype=v.dtype) for k, v in self.numpy_inputs.items() if k not in ['tfm', 'big_tfm', 'prev_feat']}
     self.run(dummy_frames, transforms, dummy_inputs)
-    if self.is_run_model:
-      self.input_queues, self.numpy_inputs, self.frame_buffers = make_stock_input_queues(
+    if legacy_fused:
+      self.input_queues, self.numpy_inputs, self.frame_buffers = make_legacy_run_model_queues(
         self.input_shapes, self.frame_skip, device=self.DEV, frame_copy_size=self.frame_copy_size)
       self.frame_views = self.frame_buffers
       self.npy = self.numpy_inputs
     else:
-      for v in self.numpy_inputs.values():
-        v[:] = 0
+      if self.frames_in_place:
+        self.input_queues, self.numpy_inputs = make_stock_input_queues(self.input_shapes, self.frame_skip, device=self.DEV)
+        self.npy = self.numpy_inputs
+      else:
+        for v in self.numpy_inputs.values():
+          v[:] = 0
       self.full_frames.clear()
       self._blob_cache.clear()
     self.prev_desire[:] = 0
@@ -217,13 +229,14 @@ class ModelState(ModelStateBase):
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
           inputs: dict[str, np.ndarray],
           after_enqueue: Callable[[], None] | None = None) -> dict[str, np.ndarray] | None:
-    if self.is_run_model:
+    if self.is_run_model and not self.frames_in_place:
       for key, buf in bufs.items():
         data = buf.data if hasattr(buf, 'data') else buf
         np.copyto(self.frame_buffers[key], np.frombuffer(data, dtype=np.uint8, count=self.frame_copy_size))
     else:
       for key, buf in bufs.items():
-        ptr = np.frombuffer(buf.data, dtype=np.uint8).ctypes.data
+        data = buf.data if hasattr(buf, 'data') else buf
+        ptr = np.frombuffer(data, dtype=np.uint8).ctypes.data
         cache_key = (key, ptr)
         if cache_key not in self._blob_cache:
           self._blob_cache[cache_key] = Tensor.from_blob(ptr, (self.frame_buf_params[key][3],), dtype='uint8', device=self.WARP_DEV)
@@ -242,7 +255,11 @@ class ModelState(ModelStateBase):
     self.numpy_inputs['big_tfm'][:, :] = transforms[self._wide_key].reshape(3, 3)
 
     if self.run_model is not None:
-      outs, = self.run_model(**{k: self.input_queues[k] for k in MODELD_INPUTS})
+      if self.frames_in_place:
+        outs, = self.run_model(frame=self.full_frames[self._road_key], big_frame=self.full_frames[self._wide_key],
+                               **{k: self.input_queues[k] for k in QUEUE_INPUTS})
+      else:
+        outs, = self.run_model(**{k: self.input_queues[k] for k in QUEUE_INPUTS})
       raw_outputs = outs
     else:
       assert self.warp is not None and self.run_policy is not None

@@ -41,7 +41,38 @@ from tinygrad.tensor import Tensor
 MODEL_TYPES = ('vision_policy', 'supercombo', 'vision_multi_policy')
 WARP_INPUTS = ['tfm', 'big_tfm']
 POLICY_INPUTS = ['img_q', 'big_img_q', 'feat_q', 'desire_q', 'packed_npy_inputs']
-nv12_copy_size = stock.nv12_copy_size
+
+
+def nv12_copy_size(stride: int, y_height: int, uv_height: int) -> int:
+  return stride * (y_height + uv_height)
+
+
+def make_legacy_run_model_queues(input_shapes, frame_skip, device, frame_copy_size):
+  # load-only shim for pre-warp-split fused pkls that pack the frames into packed_npy_inputs; nothing compiles this format anymore
+  img = input_shapes['img']
+  fb = input_shapes['features_buffer']
+  feat_dim = math.prod(fb[2:])
+  dp = input_shapes['desire_pulse']
+  n_frames = img[1] // 6
+  img_buf_shape = (frame_skip * (n_frames - 1) + 1, 6, img[2], img[3])
+
+  policy_shapes, _ = stock.get_policy_npy_shapes(input_shapes)
+  shapes = {'tfm': (3, 3), 'big_tfm': (3, 3)} | policy_shapes
+  sizes = [math.prod(s) for s in shapes.values()]
+  packed_npy_size = sum(sizes) * np.dtype(np.float32).itemsize
+  packed_input = np.zeros(packed_npy_size + 2 * frame_copy_size, dtype=np.uint8)
+  packed_npy_inputs = packed_input[:packed_npy_size].view(np.float32)
+  frames = packed_input[packed_npy_size:]
+  frame_views = {'img': frames[:frame_copy_size], 'big_img': frames[frame_copy_size:]}
+  npy = {k: v.reshape(s) for (k, s), v in zip(shapes.items(), np.split(packed_npy_inputs, np.cumsum(sizes[:-1])), strict=True)}
+  input_queues = {
+    'img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
+    'big_img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
+    'feat_q': Tensor(np.zeros((frame_skip * fb[1], fb[0], feat_dim), dtype=np.float32), device=device).contiguous().realize(),
+    'desire_q': Tensor(np.zeros((frame_skip * dp[1], dp[0], dp[2]), dtype=np.float32), device=device).contiguous().realize(),
+    'packed_npy_inputs': Tensor(packed_input, device='NPY').realize(),
+  }
+  return input_queues, npy, frame_views
 
 def _detect_desire_key(shapes: dict) -> str | None:
   return next((key for key in shapes if key.startswith('desire')), None)
@@ -140,6 +171,21 @@ def make_supercombo_input_queues(input_shapes: dict, frame_skip: int,
 
 def make_random_images(keys, shape, device, rng=None):
   return {k: Tensor.randint(shape, low=0, high=256, dtype=dtypes.uint8, device=device).realize() for k in keys}
+
+
+def make_split_warp(nv12, model_w, model_h):
+  # standalone warp for split pkls: inputs arrive on mixed devices, so move them to the compute device.
+  # the fused path uses stock.make_warp instead, which skips this because it pre-places inputs on WARP_DEV.
+  frame_prepare = stock.make_frame_prepare(nv12, model_w, model_h)
+
+  def warp(tfm, big_tfm, frame, big_frame):
+    tfm, big_tfm = tfm.to(Device.DEFAULT), big_tfm.to(Device.DEFAULT)
+    frame, big_frame = frame.to(Device.DEFAULT), big_frame.to(Device.DEFAULT)
+    Tensor.realize(tfm, big_tfm, frame, big_frame)
+    warped_frame = frame_prepare(frame, tfm).unsqueeze(0)
+    warped_big_frame = frame_prepare(big_frame, big_tfm).unsqueeze(0)
+    return Tensor.cat(warped_frame, warped_big_frame)
+  return warp
 
 
 def make_warp_queues(device=Device.DEFAULT):
@@ -326,20 +372,24 @@ if __name__ == "__main__":
     assert args.supercombo_onnx
     model_metadata = make_metadata_dict(args.supercombo_onnx)
     output_data['metadata'] = {'model': model_metadata, **model_metadata}
-    output_data['input_devices'] = {'model': Device.DEFAULT}
+    model_device, warp_device = Device.DEFAULT, Device.canonicalize(stock.WARP_DEV)
+    output_data['input_devices'] = {'model': model_device, 'warp': warp_device}
+    # on chestnut the warp must run on QCOM, not the AMD model device, or the full frames still cross USB every frame
+    if 'USB' in os.getenv('DEV', '') or os.getenv('CHESTNUT'):
+      assert warp_device != model_device, "export WARP_DEV=QCOM when compiling a chestnut bundle"
     output_data['run_model'] = {}
     derived_frame_skip = args.frame_skip or derive_frame_skip({}, model_metadata['input_shapes'])
     model_runner = OnnxRunner(args.supercombo_onnx)
     run_policy = stock.make_run_policy(model_runner, model_metadata, derived_frame_skip)
+    make_model_queues = partial(stock.make_input_queues, model_metadata['input_shapes'], derived_frame_skip)
     for cam_w, cam_h in args.camera_resolutions:
       print(f"Compiling unified run_model JIT for {cam_w}x{cam_h}...")
       nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
-      frame_copy_size = stock.nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
-      make_model_queues = partial(stock.make_input_queues, model_metadata['input_shapes'], derived_frame_skip,
-                                  frame_copy_size=frame_copy_size)
       warp = stock.make_warp(nv12, model_w, model_h)
-      run_model_jit = TinyJit(stock.make_run_model(warp, run_policy, model_metadata, frame_copy_size), prune=True)
-      output_data['run_model'][(cam_w, cam_h)] = compile_jit(run_model_jit, stock.MODELD_INPUTS, make_model_queues, benchmark_runs=args.benchmark_runs)
+      run_model_jit = TinyJit(stock.make_run_model(warp, run_policy), prune=True)
+      make_random_frames = partial(make_random_images, keys=stock.FRAME_INPUTS, shape=nv12.size, device=warp_device)
+      output_data['run_model'][(cam_w, cam_h)] = compile_jit(run_model_jit, stock.QUEUE_INPUTS, make_model_queues,
+                                                             make_random_inputs=make_random_frames, benchmark_runs=args.benchmark_runs)
   else:
     vision_runner = OnnxRunner(args.vision_onnx) if args.vision_onnx else None
     if args.model_type == 'vision_policy':
@@ -374,9 +424,9 @@ if __name__ == "__main__":
     for cam_w, cam_h in args.camera_resolutions:
       print(f"Compiling warp JIT for {cam_w}x{cam_h}...")
       nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
-      frame_copy_size = stock.nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
+      frame_copy_size = nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
       make_random_warp_inputs = partial(make_random_images, keys=['frame', 'big_frame'], shape=frame_copy_size, device=Device.DEFAULT)
-      warp = TinyJit(stock.make_warp(nv12, model_w, model_h), prune=True)
+      warp = TinyJit(make_split_warp(nv12, model_w, model_h), prune=True)
       output_data[(cam_w, cam_h)] = compile_jit(warp, WARP_INPUTS, make_warp_queues, make_random_inputs=make_random_warp_inputs)
 
     output_data['metadata']['warp_dev'] = Device.DEFAULT

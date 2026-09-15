@@ -75,7 +75,7 @@ class TestStockEquivalence(OpenpilotTestCase):
 
     frame_skip = derive_frame_skip(SPLIT_VISION_INPUT_SHAPES, SPLIT_POLICY_INPUT_SHAPES)
     stock_shapes = {**SPLIT_VISION_INPUT_SHAPES, **SPLIT_POLICY_INPUT_SHAPES, 'action_t': (1, 2)}
-    stock_queues, stock_npy, _frame_views = make_input_queues(stock_shapes, frame_skip, device='NPY', frame_copy_size=49152)
+    stock_queues, stock_npy = make_input_queues(stock_shapes, frame_skip, device='NPY')
 
     # sunnypilot split pipeline has tfm/big_tfm as queues (stock has them in npy only)
     assert set(stock_queues.keys()) <= set(state.input_queues.keys())
@@ -103,22 +103,38 @@ class TestStockEquivalence(OpenpilotTestCase):
     assert state.vision_output_slices == arch.metadata_structure['vision']['output_slices']
     assert state.policy_output_slices == arch.metadata_structure['policy']['output_slices']
 
-  def test_unified_run_model(self, tmp_path, monkeypatch, patch_modeld):
+  SHAPES = {'img': (1, 12, 128, 256), 'big_img': (1, 12, 128, 256), 'features_buffer': (1, 24, 32, 512),
+            'desire_pulse': (1, 25, 8), 'traffic_convention': (1, 2), 'action_t': (1, 2)}
+
+  def _build_run_model_state(self, tmp_path, monkeypatch, patch_modeld, input_devices=None):
     from openpilot.common.hardware import hw
     from openpilot.selfdrive.modeld.helpers import dump_oob
-    shapes = {'img': (1, 12, 128, 256), 'big_img': (1, 12, 128, 256), 'features_buffer': (1, 24, 32, 512),
-              'desire_pulse': (1, 25, 8), 'traffic_convention': (1, 2), 'action_t': (1, 2)}
-    pkl_data = {'metadata': {'model': {'input_shapes': shapes, 'output_slices': {}}},
+    pkl_data = {'metadata': {'model': {'input_shapes': self.SHAPES, 'output_slices': {}}},
                 'run_model': {(CAM_W, CAM_H): tests_helpers._noop_jit}}
+    if input_devices is not None:
+      pkl_data['input_devices'] = input_devices
     with open(tmp_path / 'driving_test_tinygrad.pkl', 'wb') as f:
       dump_oob(pkl_data, f)
-    bundle = DummyBundle(models=[DummyModel('supercombo', 'driving_test_tinygrad.pkl')])
-    patch_modeld(bundle)
+    patch_modeld(DummyBundle(models=[DummyModel('supercombo', 'driving_test_tinygrad.pkl')]))
     monkeypatch.setattr(hw.Paths, 'model_root', staticmethod(lambda: str(tmp_path)))
-    state = ModelState(cam_w=CAM_W, cam_h=CAM_H)
+    return ModelState(cam_w=CAM_W, cam_h=CAM_H)
+
+  def test_unified_run_model_legacy(self, tmp_path, monkeypatch, patch_modeld):
+    # no 'warp' in input_devices -> legacy fused pkl (frames packed into packed_npy_inputs via frame_views)
+    state = self._build_run_model_state(tmp_path, monkeypatch, patch_modeld)
     assert state.is_run_model and state.run_model is not None
     assert state.run_policy is None and state.warp is None
+    assert not state.frames_in_place
     assert 'img' in state.frame_views and 'big_img' in state.frame_views
+
+  def test_unified_run_model_frames_in_place(self, tmp_path, monkeypatch, patch_modeld):
+    # 'warp' in input_devices -> new fused pkl; frames handed to the warp device in place, no frame_views
+    state = self._build_run_model_state(tmp_path, monkeypatch, patch_modeld,
+                                        input_devices={'model': 'CPU', 'warp': 'CPU'})
+    assert state.is_run_model and state.run_model is not None
+    assert state.run_policy is None and state.warp is None
+    assert state.frames_in_place
+    assert {'img_q', 'big_img_q', 'feat_q', 'desire_q', 'packed_npy_inputs'} <= set(state.input_queues.keys())
 
 
 ARCHETYPE_NAMES = list(ARCHETYPES.keys())
