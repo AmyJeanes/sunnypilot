@@ -9,6 +9,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.main import MainLayout
 from openpilot.selfdrive.ui.mici.layouts.main import MiciMainLayout
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.sunnypilot.reproject_clock import ReprojectFrameClock
 
 BIG_UI = gui_app.big_ui()
 
@@ -45,7 +46,7 @@ def main():
     MiciMainLayout()
 
   if HARDWARE.get_device_type() == 'tizi':
-    gui_app.set_frame_clock(DriverMonitoringClock().wait)
+    gui_app.set_frame_clock(ReprojectFrameClock(DriverMonitoringClock().wait).wait)
 
   pm = messaging.PubMaster(['uiDebug'])
   for should_render, frame_time, cpu_time in gui_app.render():
