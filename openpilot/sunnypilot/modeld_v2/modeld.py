@@ -31,7 +31,6 @@ from openpilot.common.params import Params
 from openpilot.common.hardware.usb import cable_connected
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import config_realtime_process, DT_MDL
-from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
@@ -47,30 +46,12 @@ from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.modeld_v2.helpers import load_model
 from openpilot.sunnypilot.modeld_v2.frame_fusion import fused_with_warp
 from openpilot.sunnypilot.modeld_v2.model_adapters import get_model_adapter
-from openpilot.sunnypilot.models.helpers import get_active_bundle
+from openpilot.sunnypilot.models.helpers import find_driving_pkl as _find_driving_pkl, get_active_bundle
+from openpilot.sunnypilot.reproject_c4.helpers import camera_server, device_camera
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
 BIG_MODEL_TIMEOUT = 60
-
-
-def _pkl_exists(path):
-  return os.path.exists(path)
-
-
-def _find_driving_pkl(bundle):
-  if (override := os.environ.get('COMBINED_MODEL_PKL')) and _pkl_exists(override):
-    return override
-  if bundle is None or not bundle.models:
-    return None
-  from openpilot.common.hardware.hw import Paths
-  model_root = Paths.model_root()
-
-  pkl_name = bundle.models[0].artifact.fileName
-  pkl_path = os.path.join(model_root, pkl_name)
-  if _pkl_exists(pkl_path):
-    return pkl_path
-  return None
 
 
 class FrameMeta:
@@ -271,8 +252,9 @@ def main(demo=False):
   gc.disable()
 
   # visionipc clients
+  server = camera_server()
   while True:
-    available_streams = VisionIpcClient.available_streams("camerad", block=False)
+    available_streams = VisionIpcClient.available_streams(server, block=False)
     if available_streams:
       use_extra_client = VisionStreamType.VISION_STREAM_WIDE_ROAD in available_streams and VisionStreamType.VISION_STREAM_NARROW_ROAD in available_streams
       main_wide_camera = VisionStreamType.VISION_STREAM_NARROW_ROAD not in available_streams
@@ -280,8 +262,8 @@ def main(demo=False):
     time.sleep(.1)
 
   vipc_client_main_stream = VisionStreamType.VISION_STREAM_WIDE_ROAD if main_wide_camera else VisionStreamType.VISION_STREAM_NARROW_ROAD
-  vipc_client_main = VisionIpcClient("camerad", vipc_client_main_stream, True)
-  vipc_client_extra = VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, False)
+  vipc_client_main = VisionIpcClient(server, vipc_client_main_stream, True)
+  vipc_client_extra = VisionIpcClient(server, VisionStreamType.VISION_STREAM_WIDE_ROAD, False)
   cloudlog.warning(f"vision stream set up, main_wide_camera: {main_wide_camera}, use_extra_client: {use_extra_client}")
 
   while not vipc_client_main.connect(False):
@@ -412,7 +394,7 @@ def main(demo=False):
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
-      dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['narrowRoadCameraState'].sensor))]
+      dc = device_camera(str(sm['deviceState'].deviceType), str(sm['narrowRoadCameraState'].sensor))
       main_intrinsics = dc.wide_road.intrinsics if main_wide_camera else dc.narrow_road.intrinsics
       model_transform_main = get_warp_matrix(device_from_calib_euler, main_intrinsics, False).astype(np.float32)
       model_transform_extra = get_warp_matrix(device_from_calib_euler, dc.wide_road.intrinsics, True).astype(np.float32)
