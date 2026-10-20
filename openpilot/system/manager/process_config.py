@@ -181,6 +181,7 @@ procs += [
   NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model)),
   PythonProcess("modeld_warmup", "openpilot.sunnypilot.modeld_v2.warmup", only_offroad),
   PythonProcess("reprojectd", "openpilot.sunnypilot.reproject_c4.reprojectd", and_(reproject, is_stock_model)),
+  PythonProcess("reprojectcalibd", "openpilot.sunnypilot.reproject_c4.reprojectcalibd", and_(reproject, is_stock_model)),
 
   # Backup
   PythonProcess("backup_manager", "openpilot.sunnypilot.sunnylink.backups.manager", and_(only_offroad, sunnylink_ready_shim)),
