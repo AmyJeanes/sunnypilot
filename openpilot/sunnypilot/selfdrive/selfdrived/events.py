@@ -27,6 +27,20 @@ EVENT_NAME_SP = {v: k for k, v in EventNameSP.schema.enumerants.items()}
 IS_MICI = HARDWARE.get_device_type() == 'mici'
 
 
+def reproject_fit_progress(sm: messaging.SubMaster, speed: str) -> tuple[str, str] | None:
+  """While calibrationd holds for the 3X->comma 4 reprojection's camera alignment (reprojectcalibd): the calibration alert's
+  bar, and what the driver can do about it. speed is the calibration's minimum speed, as displayed."""
+  Status = custom.ReprojectCalibrationSP.Status
+  if not sm.seen['reprojectCalibrationSP'] or sm['reprojectCalibrationSP'].status == Status.fitted:
+    return None
+  fit = sm['reprojectCalibrationSP']
+  if fit.status == Status.ready:  # until reprojectd has swapped it in
+    return "Aligning cameras: 100%", "Finishing up"
+  action = {'cameras': "Waiting for cameras", 'pair': "Waiting for camera frames", 'speed': f"Drive above {speed}",
+            'straight': "Drive straight", 'features': "Road visibility low",
+            'model': "Waiting for model to load"}.get(str(fit.why), f"Stay above {speed}")
+  return f"Aligning cameras: {fit.pct}%", action
+
 def speed_limit_adjust_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   speedLimit = sm['longitudinalPlanSP'].speedLimit.resolver.speedLimit
   speed = round(speedLimit * (CV.MS_TO_KPH if metric else CV.MS_TO_MPH))

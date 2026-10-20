@@ -14,6 +14,7 @@ from openpilot.common.hardware import HARDWARE
 from openpilot.sunnypilot.selfdrive.selfdrived.events_base import EventsBase, Priority, ET, Alert, \
   NoEntryAlert, SoftDisableAlert, UserSoftDisableAlert, ImmediateDisableAlert, EngagementAlert, NormalPermanentAlert, \
   StartupAlert, AlertCallbackType, wrong_car_mode_alert
+from openpilot.sunnypilot.selfdrive.selfdrived.events import reproject_fit_progress
 
 
 AlertSize = log.SelfdriveState.AlertSize
@@ -88,9 +89,10 @@ def below_steer_speed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.S
 
 def calibration_incomplete_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   first_word = 'Recalibrating' if sm['extrinsicsCalibration'].calStatus == log.ExtrinsicsCalibration.Status.recalibrating else 'Calibrating'
+  speed = get_display_speed(MIN_SPEED_FILTER, metric)
+  title, action = reproject_fit_progress(sm, speed) or (f"{first_word}: {sm['extrinsicsCalibration'].calPerc:.0f}%", f"Drive Above {speed}")
   return Alert(
-    f"{first_word}: {sm['extrinsicsCalibration'].calPerc:.0f}%",
-    f"Drive Above {get_display_speed(MIN_SPEED_FILTER, metric)}",
+    title, action,
     AlertStatus.normal, AlertSize.mid,
     Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2)
 
