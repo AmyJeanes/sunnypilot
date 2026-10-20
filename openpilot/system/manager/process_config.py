@@ -12,6 +12,7 @@ from openpilot.common.hardware.hw import Paths
 from openpilot.sunnypilot.mapd.mapd_manager import MAPD_PATH
 
 from openpilot.sunnypilot.models.helpers import get_active_model_runner
+from openpilot.sunnypilot.reproject_c4.helpers import reproject_hardware
 from openpilot.sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready, use_sunnylink_uploader
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
@@ -93,6 +94,9 @@ def is_tinygrad_model(started, params, CP: car.CarParams) -> bool:
 def is_stock_model(started, params, CP: car.CarParams) -> bool:
   """Check if the active model runner is stock."""
   return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.stock)
+
+def reproject(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return started and reproject_hardware()
 
 def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
   return bool(os.path.exists(Paths.mapd_root()))
@@ -176,6 +180,7 @@ procs += [
   PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad),
   NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model)),
   PythonProcess("modeld_warmup", "openpilot.sunnypilot.modeld_v2.warmup", only_offroad),
+  PythonProcess("reprojectd", "openpilot.sunnypilot.reproject_c4.reprojectd", and_(reproject, is_stock_model)),
 
   # Backup
   PythonProcess("backup_manager", "openpilot.sunnypilot.sunnylink.backups.manager", and_(only_offroad, sunnylink_ready_shim)),
