@@ -128,6 +128,16 @@ def get_active_bundle(params: Params | None = None, *, chestnut: bool | None = N
   return get_selected_bundle(params, get_active_source(chestnut=chestnut))
 
 
+def find_driving_pkl(bundle) -> str | None:
+  """The driving pkl modeld_v2 loads for this bundle, or None while it is not on disk."""
+  if (override := os.environ.get('COMBINED_MODEL_PKL')) and os.path.exists(override):
+    return override
+  if bundle is None or not bundle.models:
+    return None
+  pkl_path = os.path.join(Paths.model_root(), bundle.models[0].artifact.fileName)
+  return pkl_path if os.path.exists(pkl_path) else None
+
+
 def resolve_bundle_by_ref(
   ref: str, source_bundles: dict[str, list[custom.ModelManagerSP.ModelBundle]],
 ) -> "tuple[custom.ModelManagerSP.ModelBundle, str] | None":
