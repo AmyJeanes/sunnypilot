@@ -1,0 +1,32 @@
+import json
+from SCons.Script import Value
+from openpilot.common.transformations.camera import _ar_ox_fisheye
+from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+from openpilot.sunnypilot.reproject_c4.geometry import C4_CAM, C4_NARROW, C4_WIDE, FEATHER_PX, UV_FILL, X3_NARROW, X3_WIDE_POP, ZMIN
+from openpilot.sunnypilot.reproject_c4.meter import SeamMeter
+from openpilot.sunnypilot.reproject_c4.tables import ALPHA_SHIFT, IDX_BITS, INVALID_BIT
+
+Import('lenv', 'tg_flags', 'mac_brew_string', 'taskset', 'tinygrad_files')
+
+# the comma 3X's cameras reprojected into the comma 4's, for the chestnut's big model (reprojectd)
+def frame(w, h):
+  stride, y_height, uv_height, size = get_nv12_info(w, h)
+  return f'{w},{h},{stride},{y_height},{uv_height},{size}'
+
+src_w, src_h = _ar_ox_fisheye.width, _ar_ox_fisheye.height
+frames = f'--src {frame(src_w, src_h)} --dst {frame(*C4_CAM)}'
+bits = f'--alpha-shift {ALPHA_SHIFT} --invalid-bit {INVALID_BIT}'
+deps = [File("#openpilot/system/camerad/cameras/nv12_info.py"), File("geometry.py"), File("meter.py"), File("tables.py")]
+models = "#openpilot/selfdrive/modeld/models"
+
+lenses = json.dumps({"c4_wide": C4_WIDE, "c4_narrow": C4_NARROW, "x3_wide": X3_WIDE_POP, "x3_narrow": X3_NARROW}, separators=(',', ':'))
+tables_pkl = File(f"{models}/reproject_c4_tables_{src_w}x{src_h}_tinygrad.pkl").abspath
+cmd = (f'{tg_flags} {mac_brew_string} {taskset}python3 "{File("compile_tables.py").abspath}" {frames} '
+       f"--lenses '{lenses}' --zmin {ZMIN} --feather {FEATHER_PX} {bits} --output {tables_pkl}")
+lenv.Command(tables_pkl, tinygrad_files + deps + [File("compile_tables.py"), Value(cmd)], cmd)
+
+knots = ",".join(str(k) for k in SeamMeter.KNOTS)
+stage_pkl = File(f"{models}/reproject_c4_stage_{src_w}x{src_h}_tinygrad.pkl").abspath
+cmd = (f'{tg_flags} {mac_brew_string} {taskset}python3 "{File("compile_stage.py").abspath}" {frames} '
+       f'--knots {knots} --uv-fill {UV_FILL} --idx-mask {IDX_BITS} {bits} --output {stage_pkl}')
+lenv.Command(stage_pkl, tinygrad_files + deps + [File("compile_stage.py"), Value(cmd)], cmd)
