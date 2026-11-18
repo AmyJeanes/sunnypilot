@@ -4,7 +4,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-Lens models and the narrow->wide rotation as a rotation vector."""
+Lens models, the narrow->wide rotation as a rotation vector, and where each comma 4 output pixel samples the 3X frames."""
 
 import numpy as np
 
@@ -37,6 +37,10 @@ def matrix_to_rotvec(M):
   if a < 1e-9:
     return np.zeros(3)
   return a / (2 * np.sin(a)) * np.array([M[2, 1] - M[1, 2], M[0, 2] - M[2, 0], M[1, 0] - M[0, 1]])
+
+ZMIN = np.cos(np.radians(92.0))  # a real comma 4 wide fades out at ~91-95° off-axis; the 3X lens is only measured to ~89°
+
+FEATHER_PX = 50  # composite seam width in comma 4 narrow px (50 over 24, by eye on drive clips)
 
 def _dtheta_d(t, k):
   return 1 + 3 * k[0] * t**2 + 5 * k[1] * t**4 + 7 * k[2] * t**6
@@ -90,3 +94,34 @@ def rotvec_to_matrix(v):
   k = v / a
   K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
   return np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * K @ K
+
+def sample_coords(out_cam, dst_w, dst_h, scale, calib):
+  """Float 3X wide / narrow coordinates for every comma 4 `out_cam` pixel (scale 0.5 = the half-res chroma plane)."""
+  xs, ys = np.meshgrid((np.arange(dst_w) + 0.5) / scale, (np.arange(dst_h) + 0.5) / scale)
+  return sample_points(out_cam, np.stack([xs, ys], -1), scale, calib)
+
+def sample_points(out_cam, px, scale, calib):
+  """sample_coords for comma 4 `out_cam` pixel centers `px` (..., 2) given in full-resolution px."""
+  if out_cam == "wide":
+    rays = unproject_fisheye(px, C4_WIDE)
+  else:
+    rays = unproject_pinhole_k1(px, C4_NARROW)
+  rays_w = rays @ rotvec_to_matrix(calib["R"]).T
+  mw = project_fisheye(rays_w, calib["wide"]) * scale
+  mw[rays_w[..., 2] < ZMIN] = -1
+  mn = project_pinhole_k1(rays, calib["narrow"]) * scale
+  mn[rays[..., 2] <= 0] = -1
+  return mw, mn
+
+def _nv12_index(xy, src_w, src_h, stride, uv_offset, chroma):
+  """Nearest-neighbor byte index into a source NV12 buffer for float sample coords; chroma coords are in the half-res plane.
+  Returns (index, valid). For chroma the caller adds +1 for the V byte."""
+  xy = np.clip(np.nan_to_num(xy, nan=-1.0), -1e6, 1e6)  # grazing rays project to ±inf
+  x = np.round(xy[..., 0] - 0.5).astype(np.int64)
+  y = np.round(xy[..., 1] - 0.5).astype(np.int64)
+  w, h = (src_w // 2, src_h // 2) if chroma else (src_w, src_h)
+  valid = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+  x = np.clip(x, 0, w - 1)
+  y = np.clip(y, 0, h - 1)
+  idx = (uv_offset + y * stride + 2 * x) if chroma else (y * stride + x)
+  return idx, valid
