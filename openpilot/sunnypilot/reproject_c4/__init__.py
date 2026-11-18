@@ -13,8 +13,14 @@ rotation and the per-frame work is one gather per output byte (two plus a blend 
 model's own crop warp. Both are tinygrad programs the build compiles next to modeld's warps (compile_tables.py,
 compile_stage.py).
 
+Outputs are NV12 buffers in the comma 4 camerad layout so the model pkl (keyed by its camera size) sees exactly what a
+comma 4 would have given it.
+
 geometry: lenses, rotations, sample coordinates. tables: the table layout and its numpy reference. meter: the seam match
-the stage applies. kernel (the GPU stage, tinygrad) is imported by the stage alone."""
+the stage applies, from the exposure model. rotation: the fitted rotation across boots. cameras: camerad's frame pairs.
+kernel (the GPU stage, tinygrad) is imported by the stage alone."""
 from .geometry import *  # noqa: F403
 from .meter import *  # noqa: F403
 from .tables import *  # noqa: F403
+from .rotation import *  # noqa: F403
+from .cameras import *  # noqa: F403
