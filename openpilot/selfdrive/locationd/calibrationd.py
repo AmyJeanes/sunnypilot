@@ -20,6 +20,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import config_realtime_process
 from openpilot.common.transformations.orientation import rot_from_euler, euler_from_rot
 from openpilot.common.swaglog import cloudlog
+from openpilot.sunnypilot.selfdrive.locationd.calibrationd_ext import CalibratorExt, REPROJECT_SERVICES
 
 MIN_SPEED_FILTER = 15 * CV.MPH_TO_MS
 MAX_VEL_ANGLE_STD = np.radians(0.25)
@@ -61,7 +62,7 @@ def sanity_clip(rpy: np.ndarray) -> np.ndarray:
 def moving_avg_with_linear_decay(prev_mean: np.ndarray, new_val: np.ndarray, idx: int, block_size: float) -> np.ndarray:
   return (idx*prev_mean + (block_size - idx) * new_val) / block_size
 
-class Calibrator:
+class Calibrator(CalibratorExt):
   def __init__(self, param_put: bool = False):
     self.param_put = param_put
 
@@ -263,7 +264,8 @@ def main() -> NoReturn:
   config_realtime_process([0, 1, 2, 3], 5)
 
   pm = messaging.PubMaster(['extrinsicsCalibration'])
-  sm = messaging.SubMaster(['cameraOdometry', 'carState'], poll='cameraOdometry')
+  sm = messaging.SubMaster(['cameraOdometry', 'carState'] + REPROJECT_SERVICES, poll='cameraOdometry',
+                           ignore_alive=REPROJECT_SERVICES, ignore_avg_freq=REPROJECT_SERVICES, ignore_valid=REPROJECT_SERVICES)
 
   params_reader = Params()
   CP = messaging.log_from_bytes(params_reader.get("CarParams", block=True), car.CarParams)
@@ -275,7 +277,7 @@ def main() -> NoReturn:
     timeout = 0 if sm.frame == -1 else 100
     sm.update(timeout)
 
-    if sm.updated['cameraOdometry']:
+    if sm.updated['cameraOdometry'] and calibrator.reproject_ready(sm):
       calibrator.handle_v_ego(sm['carState'].vEgo)
       new_rpy = calibrator.handle_cam_odom(sm['cameraOdometry'].trans,
                                            sm['cameraOdometry'].rot,

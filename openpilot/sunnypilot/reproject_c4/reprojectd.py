@@ -8,17 +8,19 @@ See the LICENSE.md file in the root directory for more details.
 The 3X's cameras as a comma 4's. Reprojects camerad's narrow and wide frames into the comma 4 geometry on the QCOM GPU
 (reproject_c4: the wide as the surround, the narrow as the sharp inset) and serves the pair as VisionIPC streams "reproject"
 (narrow = the composite, wide), with camerad's frame ids and timestamps, so modeld runs comma's big model on them as it would
-on a mici. The seam exposure meter lives here. It publishes nothing: the stage's timing goes to the log as a summary a minute
+on a mici. The seam exposure meter lives here, and a rotation reprojectcalibd publishes as ready is swapped in here. It
+publishes nothing: reprojectCalibrationSP carries the rotation, and the stage's timing goes to the log as a summary a minute
 (reprojectd.stage)."""
 import os
 os.environ.setdefault('QCOM_PRIORITY', '1')  # KGSL context priority: the stage preempts the driver-monitoring model's 20 ms
 os.environ.setdefault('DEV', 'QCOM')  # tinygrad's default device: never probe the eGPU, modeld owns it (its USB lock)
+import threading
 import time
 
 import numpy as np
 from tinygrad import Tensor, Device
 
-from openpilot.cereal import messaging
+from openpilot.cereal import messaging, custom
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient, VisionIpcServer
 from openpilot.common.realtime import config_realtime_process
@@ -36,11 +38,15 @@ class Stage:
     self.src_wh = src_wh
     self.src_size = get_nv12_info(*src_wh)[3]
     self.rotation = RC.load_rotation()
+    self.fitted = bool(RC.read_rotation())
     cloudlog.warning(f"reprojectd: rotation {np.degrees(self.rotation).round(3)} deg, "
-                     + ('fitted' if RC.read_rotation() else 'seeded from CalibrationParams / the fleet median'))
+                     + ('fitted' if self.fitted else 'seeded from CalibrationParams / the fleet median'))
     self.rp = Reprojector(src_wh, 'QCOM')
     self.rp.set_rotation(self.rotation)
     self.meter = RC.SeamMeter(RC.SeamMeter.geometry(src_wh, C4_CAM, RC.calib_from_rotvec(self.rotation)))
+    self.pending: tuple | None = None
+    self.loader: threading.Thread | None = None
+    self.saver: threading.Thread | None = None
     self._src_tensors: dict[int, Tensor] = {}
     self.out = np.zeros((2, self.rp.body), np.uint8)  # composite, wide: the stage writes here, the server copies into its ring
     self.rp.bind(self.out[1], self.out[0])
@@ -66,8 +72,39 @@ class Stage:
     the next pair (a measurement takes longer than the stage on the GPU)."""
     self.match = self.meter.update(np.frombuffer(wide.data, dtype=np.uint8), np.frombuffer(narrow.data, dtype=np.uint8), model_gain)
 
+  def follow_fit(self, fit) -> None:
+    """A rotation reprojectcalibd has published as ready is swapped in between frames: the seam meter's ring is sampled for it
+    off the frame loop (~0.2 s of numpy), then its tables are built on the GPU (~40 ms, ahead of the next stage). It is then
+    kept in ReprojectRotation: that is what tells reprojectcalibd it is applied, so it is saved again while reprojectcalibd
+    still says ready. calibrationd holds meanwhile, so the car cannot be engaged around the swap."""
+    if self.pending is not None:
+      rot, geometry = self.pending
+      self.pending = self.loader = None
+      t0 = time.perf_counter()
+      self.rp.set_rotation(rot)
+      self.meter = RC.SeamMeter(geometry)
+      self.rotation, self.fitted = rot, True
+      cloudlog.warning(f"reprojectd: fitted rotation {np.degrees(rot).round(3)} deg swapped in ({(time.perf_counter() - t0) * 1e3:.0f} ms)")
+      return
+    if self.loader is not None or fit is None or fit.status != custom.ReprojectCalibrationSP.Status.ready or len(fit.target) != 3:
+      return
+    rot = tuple(float(v) for v in fit.target)
+    if rot == self.rotation:
+      if self.saver is None or not self.saver.is_alive():
+        def save():  # a param write, off the frame loop
+          os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))  # inherited SCHED_FIFO otherwise
+          RC.save_rotation(rot)
+        self.saver = threading.Thread(target=save, daemon=True)
+        self.saver.start()
+      return
+    def load():
+      os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
+      self.pending = (rot, RC.SeamMeter.geometry(self.src_wh, C4_CAM, RC.calib_from_rotvec(rot)))
+    self.loader = threading.Thread(target=load, daemon=True)
+    self.loader.start()
+
 def main():
-  sm = messaging.SubMaster(['narrowRoadCameraState', 'wideRoadCameraState'])
+  sm = messaging.SubMaster(['narrowRoadCameraState', 'wideRoadCameraState', 'reprojectCalibrationSP'])
   narrow = VisionIpcClient("camerad", NARROW, True)
   wide = VisionIpcClient("camerad", WIDE, False)
   while not narrow.connect(False):
@@ -112,6 +149,8 @@ def main():
                      p95_ms=round(float(np.percentile(ms, 95)), 2), max_ms=round(float(ms.max()), 2), over_8ms=int((ms > 8).sum()))
       stage_ms.clear()
       summary_t = time.monotonic()
+    if n % 20 == 0:
+      stage.follow_fit(sm['reprojectCalibrationSP'] if sm.seen['reprojectCalibrationSP'] else None)
 
 
 if __name__ == "__main__":

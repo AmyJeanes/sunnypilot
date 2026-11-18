@@ -40,3 +40,7 @@ def load_rotation():
   except Exception:
     pass
   return POP_ROTATION
+
+def save_rotation(rotvec, **extra) -> None:
+  from openpilot.common.params import Params
+  Params().put(ROTATION_PARAM, {'rotvec': [float(v) for v in rotvec], **extra}, block=True)
