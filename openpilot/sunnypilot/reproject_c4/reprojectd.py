@@ -8,7 +8,7 @@ See the LICENSE.md file in the root directory for more details.
 The 3X's cameras as a comma 4's. Reprojects camerad's narrow and wide frames into the comma 4 geometry on the QCOM GPU
 (reproject_c4: the wide as the surround, the narrow as the sharp inset) and serves the pair as VisionIPC streams "reproject"
 (narrow = the composite, wide), with camerad's frame ids and timestamps, so modeld runs comma's big model on them as it would
-on a mici. It publishes nothing: the stage's timing goes to the log as a summary a minute
+on a mici. The seam exposure meter lives here. It publishes nothing: the stage's timing goes to the log as a summary a minute
 (reprojectd.stage)."""
 import os
 os.environ.setdefault('QCOM_PRIORITY', '1')  # KGSL context priority: the stage preempts the driver-monitoring model's 20 ms
@@ -40,6 +40,7 @@ class Stage:
                      + ('fitted' if RC.read_rotation() else 'seeded from CalibrationParams / the fleet median'))
     self.rp = Reprojector(src_wh, 'QCOM')
     self.rp.set_rotation(self.rotation)
+    self.meter = RC.SeamMeter(RC.SeamMeter.geometry(src_wh, C4_CAM, RC.calib_from_rotvec(self.rotation)))
     self._src_tensors: dict[int, Tensor] = {}
     self.out = np.zeros((2, self.rp.body), np.uint8)  # composite, wide: the stage writes here, the server copies into its ring
     self.rp.bind(self.out[1], self.out[0])
@@ -53,12 +54,17 @@ class Stage:
     return self._src_tensors[ptr]
 
   def run(self, wide, narrow) -> None:
-    """Reproject this frame pair with the current seam match."""
+    """Reproject this frame pair with the seam match measured on the last one (measure). The match is filtered over frames,
+    so a frame's lag does not show."""
     t0 = time.perf_counter()
     self.rp(self.src_tensor(wide), self.src_tensor(narrow), self.match)
     Device['QCOM'].synchronize()
     self.time = time.perf_counter() - t0
 
+  def measure(self, wide, narrow, model_gain: float) -> None:
+    """The seam match for the next pair, measured on this one once it is served: off the frame's latency, in the time before
+    the next pair (a measurement takes longer than the stage on the GPU)."""
+    self.match = self.meter.update(np.frombuffer(wide.data, dtype=np.uint8), np.frombuffer(narrow.data, dtype=np.uint8), model_gain)
 
 def main():
   sm = messaging.SubMaster(['narrowRoadCameraState', 'wideRoadCameraState'])
@@ -91,13 +97,13 @@ def main():
       continue
     buf_n, buf_w = pair
     sm.update(0)
-    # the sensors' exposure settings: the seam match until it is measured
+    # the sensors' exposure settings: the seam match falls back to them when its ring is unusable
     ncs, wcs = sm['narrowRoadCameraState'], sm['wideRoadCameraState']
     g = RC.exposure_gain(ncs.gain * ncs.integLines, wcs.gain * wcs.integLines) if sm.seen['narrowRoadCameraState'] and sm.seen['wideRoadCameraState'] else 1.0
-    stage.match = RC.exposure_match(g)
     stage.run(buf_w, buf_n)
     server.send(NARROW, stage.out[0], narrow.frame_id, narrow.timestamp_sof, narrow.timestamp_eof)
     server.send(WIDE, stage.out[1], wide.frame_id, wide.timestamp_sof, wide.timestamp_eof)
+    stage.measure(buf_w, buf_n, g)
     n += 1
     stage_ms.append(stage.time * 1e3)
     if time.monotonic() - summary_t >= 60.0:
