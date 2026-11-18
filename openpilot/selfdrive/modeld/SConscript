@@ -70,3 +70,5 @@ for cam_w, cam_h in [] if os.getenv('SKIP_TINYGRAD_COMPILE') else camera_configs
          f'--frame {cam_w},{cam_h},{stride},{y_height},{uv_height},{frame_size} --warp-to {dm_w}x{dm_h} '
          f'--layout luma --border-fill 16 --transform-device NPY --output {dm_pkl_path}')
   lenv.Command(dm_pkl_path, tinygrad_files + warp_deps + [Value(cmd)], cmd)
+
+SConscript('#openpilot/sunnypilot/reproject_c4/SConscript', exports=['lenv', 'tg_flags', 'mac_brew_string', 'taskset', 'tinygrad_files'])

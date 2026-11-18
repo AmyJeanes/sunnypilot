@@ -42,6 +42,8 @@ ZMIN = np.cos(np.radians(92.0))  # a real comma 4 wide fades out at ~91-95° off
 
 FEATHER_PX = 50  # composite seam width in comma 4 narrow px (50 over 24, by eye on drive clips)
 
+UV_FILL = 128
+
 def _dtheta_d(t, k):
   return 1 + 3 * k[0] * t**2 + 5 * k[1] * t**4 + 7 * k[2] * t**6
 
@@ -125,3 +127,5 @@ def _nv12_index(xy, src_w, src_h, stride, uv_offset, chroma):
   y = np.clip(y, 0, h - 1)
   idx = (uv_offset + y * stride + 2 * x) if chroma else (y * stride + x)
   return idx, valid
+
+C4_CAM = (1344, 760)  # the comma 4 narrow/wide frame the stage produces, the size the big model's pkl is keyed by

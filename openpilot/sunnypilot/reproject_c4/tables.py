@@ -4,8 +4,8 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-The gather tables that map every comma 4 output byte to a 3X source byte. build_tables builds them in numpy;
-the device will build the same on the GPU."""
+The gather tables that map every comma 4 output byte to a 3X source byte. The device builds them on the GPU (compile_tables.py);
+build_tables is the same in numpy, the reference the compiled program is checked against."""
 import numpy as np
 
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
