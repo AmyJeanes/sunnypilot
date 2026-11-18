@@ -193,7 +193,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"QuickBootToggle", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"QuietMode", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"RainbowMode", {PERSISTENT | BACKUP, BOOL, "0"}},
-    {"ReprojectC4", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"ReprojectC4", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"ReprojectRotation", {PERSISTENT, JSON}},
     {"RoadEdgeLaneChangeEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"RocketFuel", {PERSISTENT | BACKUP, BOOL, "0"}},
